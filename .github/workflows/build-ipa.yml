@@ -566,3 +566,5 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
           path: ${{ env.WORK_DIR }}/*_build/logs
+
+# keep workflow indexed
