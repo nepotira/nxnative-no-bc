@@ -377,6 +377,7 @@ DM_WATCH	diagnostic	`=<s>` dumps all threads after that many seconds (SIGALRM) a
 DM_WATCH_SAMPLE	diagnostic	`=<path>` (Mac): when the stall watchdog fires, samples the process for 1 s with `/usr/bin/sample` and writes the thread stacks to that path
 DM_WATCH_STALL	diagnostic	`=<s>`: when the frame loop makes no progress for that long (default 15 with `DM_WATCH`), logs a red line, dumps the threads and exits
 DM_WEB_LOG	diagnostic	`1` logs each key an offline HTML page is given and where the focus is after it
+DM_WIDESCREEN	player	`1` (default on patched iOS builds) widens the 3D camera projection, 2D layout ortho width and full-screen backdrop panes to fill the iPhone's landscape drawable natively without cropping or stretching HUD icons; `0` uses normal 16:9 framing. iOS only
 DM_WINDOW	switch	When set (to any value, `0` included) opens a Mac window with keyboard and controller input; unset runs headless with the guest on the current thread; the Mac launcher sets it
 DM_WINDOW_TOP	diagnostic	`1` (Mac, with `DM_WINDOW`) orders the game window in front without activating it and keeps it above other apps' windows, so a covered window does not slow the run; `regress.py` sets it
 DM_XCODE_DERIVED_DATA	path	Xcode derived data folder for `build_ipa.sh` (default `$W/build/ios/xcode-dd`); the NSP script points it into the game's build folder
