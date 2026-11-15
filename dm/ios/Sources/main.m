@@ -158,6 +158,7 @@ static int boot_env(void) {
     }
     setenv("DM_ENV_FILE_KEYS", [from_file componentsJoinedByString:@" "].UTF8String, 1);   // the launcher keeps what an env file set (LauncherSettings.swift)
     setenv("DM_ENV_LAUNCH_KEYS", [from_launch componentsJoinedByString:@" "].UTF8String, 1);   // and what the launch environment set (docs/frontends.md, Saved choices)
+    setenv("DM_QOS_MAP", "1", 0);   // Map Switch thread priorities to iOS QoS classes by default (env.txt DM_QOS_MAP=0 still overrides)
     front_hud_env();   // an env file's DM_METAL_HUD; nothing in this process makes a Metal device before startGame (front_ios.m), which applies the launcher's
     // Game language (nn::oe::GetDesiredLanguage, hle_oe.c): the one the IPA was packed with (the NSP script's LANGUAGE / --language → DMLanguage in Info.plist), unless an env file sets DM_LANG
     // (or the launcher, which replaces this default before the game starts)
@@ -215,6 +216,19 @@ static NSString *program_env(void) {
     if (!romfs) return nil;
     fprintf(stderr, "boot: game files %s\n", romfs.fileSystemRepresentation);
     setenv("DM_ROMFS", romfs.fileSystemRepresentation, 0);
+    if (!getenv("DM_ROMFS_OVERLAY")) {
+        NSMutableArray<NSString *> *ov = [NSMutableArray array];
+        NSString *docOv = [doc stringByAppendingPathComponent:@"romfs_overlay"];
+        BOOL isDir = NO;
+        if ([fm fileExistsAtPath:docOv isDirectory:&isDir] && isDir) [ov addObject:docOv];
+        NSString *appOv = [res stringByAppendingPathComponent:@"romfs_overlay"];
+        if ([fm fileExistsAtPath:appOv isDirectory:&isDir] && isDir) [ov addObject:appOv];
+        if (ov.count) {
+            NSString *joined = [ov componentsJoinedByString:@":"];
+            setenv("DM_ROMFS_OVERLAY", joined.fileSystemRepresentation, 0);
+            fprintf(stderr, "boot: romfs overlay %s\n", joined.fileSystemRepresentation);
+        }
+    }
     setenv("DM_NVN_SHMAP", [dmdir stringByAppendingPathComponent:@"shader_map.tsv"].fileSystemRepresentation, 0);
     setenv("DM_MSL_DIR", msl.fileSystemRepresentation, 0);
     return dmdir;

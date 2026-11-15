@@ -112,7 +112,7 @@ if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's modules under its tag (th
   done < <(prog_rows); prog_back
 else J=(); [ -f "$(dirname "$ROMFS")/jit/jit.img" ] && J=(--jit "$(dirname "$ROMFS")/jit/jit.img")
   F=$(python3 tools/gen_embed.py ${J[@]+"${J[@]}"} "$PATCHED" Gen/embed.S $MODS) || die "gen_embed"; fi
-echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F" >> Gen/dm.xcconfig
+echo "OTHER_LDFLAGS = \$(inherited) \$(DM_FRAMEWORKS) $F -lz" >> Gen/dm.xcconfig
 # One program's tables into TD: the rewriter's, the shader tables and the launcher's settings
 program_tables() {
 cp "$PATCHED"/*.fixups.tsv "$PATCHED"/*.gates.tsv "$PATCHED"/*.cuts.tsv "$PATCHED"/*.obs.tsv $TD/ || die "copy rewriter tables"
@@ -235,7 +235,7 @@ if [ -n "${DM_ENTITLEMENTS-default}" ]; then
   t "entitlements in the executable's ad-hoc signature (the install tool re-signs and keeps them)"
 fi
 P=Payload/DmIOS.app
-SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/html --skip $P/jit)
+SKIP=(--skip $P/_CodeSignature --skip $P/embedded.mobileprovision --skip $P/msl --skip $P/aoc --skip $P/romfs --skip $P/romfs.img --skip $P/romfs.id --skip $P/romfs_overlay --skip $P/html --skip $P/jit)
 if [ -n "${PROGRAMS_TSV:-}" ]; then   # each program's shader libraries, RomFS, offline HTML pages and nn::jit image under its own folder
   [ "${DM_COPY_ROMFS:-YES}" != NO ] || die "DM_COPY_ROMFS=NO: a game of several programs keeps its programs' files in the app"
   MAPS=("$P=$APP")
@@ -258,6 +258,7 @@ if [ "${DM_COPY_ROMFS:-YES}" = NO ]; then
   fi
 elif [ -f "$ROMFS" ]; then MAPS=("$P/romfs.img=$ROMFS"); else MAPS=("$P/romfs=$ROMFS"); fi
 if [ -n "$AOC" ] && [ -d "$AOC" ]; then MAPS+=("$P/aoc=$AOC"); t "add-on content: $(ls "$AOC" | tr '\n' ' ')"; fi
+if [ -n "${DM_ROMFS_OVERLAY_DIR:-}" ] && [ -d "$DM_ROMFS_OVERLAY_DIR" ]; then MAPS+=("$P/romfs_overlay=$DM_ROMFS_OVERLAY_DIR"); t "romfs overlay: $DM_ROMFS_OVERLAY_DIR"; fi
 if [ -n "${PSO:-}" ]; then MAPS+=("$P/pso=$PSO"); fi
 MAPS+=("$P/msl/$MSLDIR=$MSL_IOS/$MSLDIR" "$P=$APP")
   if [ -d "$(dirname "$ROMFS")/html" ]; then MAPS+=("$P/html=$(dirname "$ROMFS")/html"); t "offline HTML pages: $(dirname "$ROMFS")/html"; fi   # beside its RomFS, where the host finds them (hle_web.c)

@@ -61,15 +61,78 @@ private struct CloudSavesSection: View {
     }
 }
 
-/// UIDocumentPickerViewController for a folder, in the two callbacks a SwiftUI sheet wants.
+private struct SaveAndModSection: View {
+    @State private var pickingSave = false
+    @State private var pickingMod = false
+    @State private var note: String = ""
+    @State private var modFiles: UInt = 0
+    @State private var hasBundledMod: Bool = false
+
+    var body: some View {
+        Section {
+            Button("Import save (.zip)…") { pickingSave = true }
+                .sheet(isPresented: $pickingSave) {
+                    DocumentPicker(types: [.zip], asCopy: true) { url in
+                        pickingSave = false
+                        defer { try? FileManager.default.removeItem(at: url) }
+                        var count: UInt = 0
+                        if let err = dm_import_save_zip(url, &count) {
+                            note = err
+                        } else {
+                            note = "Imported \(count) save file\(count == 1 ? "" : "s"). Previous save backed up in save-backups."
+                        }
+                    } onCancel: { pickingSave = false }
+                }
+            Button("Import RomFS mod (.zip)…") { pickingMod = true }
+                .sheet(isPresented: $pickingMod) {
+                    DocumentPicker(types: [.zip], asCopy: true) { url in
+                        pickingMod = false
+                        defer { try? FileManager.default.removeItem(at: url) }
+                        var count: UInt = 0
+                        if let err = dm_import_romfs_mod_zip(url, &count) {
+                            note = err
+                        } else {
+                            refresh()
+                            note = "Imported RomFS mod (\(count) file\(count == 1 ? "" : "s")). Active on Play."
+                        }
+                    } onCancel: { pickingMod = false }
+                }
+            if modFiles > 0 {
+                Button("Remove imported mod (\(modFiles) files)", role: .destructive) {
+                    dm_clear_romfs_mods()
+                    refresh()
+                    note = "Removed imported RomFS mod."
+                }
+            } else if hasBundledMod {
+                HStack {
+                    Text("Bundled RomFS mod")
+                    Spacer()
+                    Text("Active").foregroundStyle(.secondary)
+                }
+            }
+        } footer: {
+            Text(note.isEmpty
+                 ? "Import a Switch save (.zip) into Documents/save (creates an automatic backup in save-backups), or apply a RomFS mod (.zip) over game files."
+                 : note)
+        }
+        .onAppear(perform: refresh)
+    }
+
+    private func refresh() {
+        modFiles = dm_romfs_mod_file_count()
+        hasBundledMod = dm_has_bundled_romfs_mod()
+    }
+}
+
+/// UIDocumentPickerViewController for a folder or file, in the two callbacks a SwiftUI sheet wants.
 private struct DocumentPicker: UIViewControllerRepresentable {
     var types: [UTType] = [.folder]
+    var asCopy: Bool = false
     let onPick: (URL) -> Void
     let onCancel: () -> Void
 
     func makeUIViewController(context: Context) -> UIDocumentPickerViewController {
-        // .open (not .import): the folder stays where it is and the bookmark keeps pointing at it.
-        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: false)
+        let picker = UIDocumentPickerViewController(forOpeningContentTypes: types, asCopy: asCopy)
         picker.allowsMultipleSelection = false
         picker.delegate = context.coordinator
         return picker
@@ -131,6 +194,7 @@ private struct LauncherView: View {
                         Text("Brings back all settings this game was tested with.")
                     }
                     CloudSavesSection()
+                    SaveAndModSection()
                     Section {
                         HStack {
                             Text("Memory available")

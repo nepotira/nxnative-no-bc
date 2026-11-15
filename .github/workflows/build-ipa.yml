@@ -53,6 +53,14 @@ on:
         required: true
         default: false
         type: boolean
+      pso_gpus:
+        description: 'Optional: offline pipeline archive GPUs (e.g. g18p or none). Defaults to none for iphone14pro_a16'
+        required: false
+        default: ''
+      romfs_overlay:
+        description: 'Optional: RomFS mod .zip filename on tunnel or https:// URL (e.g. PT_BR.zip) baked as romfs_overlay'
+        required: false
+        default: ''
 
 permissions:
   actions: read     # to download an earlier run's shader bundle (shader_from_run)
@@ -436,6 +444,49 @@ jobs:
               except Exception as e: print('  could not read it:', e)
           PY
 
+      - name: Download optional RomFS overlay mod
+        if: inputs.romfs_overlay != ''
+        env:
+          OVERLAY_IN: ${{ inputs.romfs_overlay }}
+          TUNNEL_URL: ${{ steps.tunnel.outputs.url }}
+        run: |
+          set -euo pipefail
+          arc="$RUNNER_TEMP/romfs_overlay.zip"
+          raw="$RUNNER_TEMP/romfs_overlay_raw"
+          out="$RUNNER_TEMP/romfs_overlay"
+          rm -rf "$arc" "$raw" "$out"; mkdir -p "$raw" "$out"
+          if [[ "$OVERLAY_IN" == *drive.google.com* ]]; then
+            fuzzy=""; if gdown --help 2>&1 | grep -q -- '--fuzzy'; then fuzzy="--fuzzy"; fi
+            gdown $fuzzy "$OVERLAY_IN" -O "$arc"
+          elif [[ "$OVERLAY_IN" == https://* ]]; then
+            aria2c -c -x4 -s4 --max-tries=5 --retry-wait=10 -d "$RUNNER_TEMP" -o romfs_overlay.zip "$OVERLAY_IN"
+          elif [[ "$TUNNEL_URL" != *drive.google.com* ]]; then
+            enc=$(python3 -c 'import urllib.parse,sys; print(urllib.parse.quote(sys.argv[1]))' "$OVERLAY_IN")
+            aria2c -c -x4 -s4 --max-tries=5 --retry-wait=10 -d "$RUNNER_TEMP" -o romfs_overlay.zip "${TUNNEL_URL%/}/$enc"
+          else
+            echo "::error::romfs_overlay must be a full https:// URL when tunnel_url is a Google Drive link"; exit 1
+          fi
+          unzip -q "$arc" -d "$raw"
+          python3 - "$raw" "$out" <<'PY'
+          import os, shutil, sys
+          src, out = sys.argv[1], sys.argv[2]
+          for _ in range(2):
+              kids = [k for k in os.listdir(src) if k not in ('__MACOSX', '.DS_Store')]
+              if len(kids) == 1:
+                  child = os.path.join(src, kids[0])
+                  if os.path.isdir(child) and (
+                      kids[0].lower() == 'romfs'
+                      or os.path.isdir(os.path.join(child, 'romfs'))
+                      or os.path.isdir(os.path.join(child, 'LocalizedData'))
+                  ):
+                      src = child
+                      continue
+              break
+          shutil.copytree(src, out, dirs_exist_ok=True)
+          PY
+          echo "DM_ROMFS_OVERLAY_DIR=$out" >> "$GITHUB_ENV"
+          find "$out" -type f | head -n 20
+
       - name: Build the IPA
         # A hosted job is stopped at 6 hours for good. Stopping this step sooner leaves the shader cache and bundle steps below their normal time to save what
         # was compiled (cas.db keeps every finished shader, so the next run carries on); stopped at the job limit they would get a few minutes.
@@ -443,10 +494,15 @@ jobs:
         env:
           ALLOW_OTHER_METAL: ${{ inputs.allow_other_metal }}
           ROMFS_MODE: ${{ inputs.romfs }}
+          PSO_GPUS_IN: ${{ inputs.pso_gpus }}
+          DEVICE_TYPE: ${{ inputs.device_type }}
         run: |
           set -euo pipefail
           extra=""
           if [ "$ALLOW_OTHER_METAL" = "true" ]; then extra="--allow-other-metal"; fi
+          gpu="$PSO_GPUS_IN"
+          if [ -z "$gpu" ] && [ "$DEVICE_TYPE" = "iphone14pro_a16" ]; then gpu="none"; fi
+          if [ -n "$gpu" ]; then extra="$extra --gpu $gpu"; fi
           python3 scripts/build_ipa_from_nsp.py "$WORK_DIR" \
             -k "$HOME/.switch/prod.keys" --progress lines --romfs "$ROMFS_MODE" $extra
 
