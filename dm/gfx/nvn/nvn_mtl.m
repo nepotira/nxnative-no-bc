@@ -2463,9 +2463,19 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
 // so a record replayed again soon still finds its texture
 enum { NGHOST = 512 };
+static inline int ios_tight_ram(void) {
+#if TARGET_OS_IPHONE
+    static int v = -1;
+    if (v < 0) v = [NSProcessInfo processInfo].physicalMemory <= (6500ull << 20);   // <= 6 GiB devices (e.g. iPhone 14) keep tighter GPU cache caps
+    return v;
+#else
+    return 0;
+#endif
+}
+static inline unsigned ghost_cap(void) { return ios_tight_ram() ? 128u : (unsigned)NGHOST; }
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
 static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
-static unsigned g_ghost_old, g_ghost_limit = NGHOST;   // g_ghost_old: ring index (counted like g_ghost_next) of the oldest slot that may hold an entry; g_ghost_limit: how many entries the table keeps (NGHOST; lower while memory is short, mem_pressure_tick)
+static unsigned g_ghost_old, g_ghost_limit = NGHOST;   // g_ghost_old: ring index (counted like g_ghost_next) of the oldest slot that may hold an entry; g_ghost_limit: how many entries the table keeps (ghost_cap; lower while memory is short, mem_pressure_tick)
 void mtl_tex_init(const tex_t *t) {
     if (!t->serial) return;
     tex_t *desc = image_shape(t) ? malloc(sizeof *desc) : NULL; if (desc) *desc = *t;
@@ -2518,7 +2528,11 @@ static void tex_put(uint64_t k, id o) {   // serials from 2^62 up are external t
     }
     hm_put_id(m, &k, o); tex_pin *pin=nvn_hm_get(&g_tex_pins,&k); if(pin) tex_pin_set(pin,o); ser_note(k);
     count_add(m == &g_by_serial ? &g_by_serial_held : &g_ghost_held, (__bridge void *)o, 1);
-    if (m == &g_ghost && g_ghost_limit < NGHOST) ghost_enforce(NULL);
+    if (m == &g_ghost) {
+        static int ghost_inited;
+        if (!ghost_inited) { ghost_inited = 1; unsigned c = ghost_cap(); if (c < g_ghost_limit) g_ghost_limit = c; }
+        if (g_ghost_limit < NGHOST) ghost_enforce(NULL);
+    }
     pthread_mutex_unlock(&g_smu);
 }
 // Host record of a packaged texture: the current MTLTexture, the upload stamp, and the global write generation at the last check
@@ -2888,6 +2902,7 @@ static void up_wait_zero(_Atomic int *v, int site) {
 }
 static unsigned g_up_seq;
 #define UP_BLOCK_SIZE (32u * 1024u * 1024u)
+static inline size_t up_block_sz(void) { return ios_tight_ram() ? (16u * 1024u * 1024u) : UP_BLOCK_SIZE; }
 // Each upload slot keeps its staging resident until its next batch (up_begin waits for the previous batch). Grow the first block to the slot's previous batch demand, not just its first texture:
 // a small first texture followed by a large one otherwise allocates and retires a fresh 32 MB overflow every frame. Keep one overflow as well, at most 64 MB per slot / 192 MB across all three.
 // Bursts beyond that budget and individual uploads larger than UP_BLOCK_SIZE still use temporary blocks, retired only after their GPU work. DM_NVN_UPLOAD_REUSE=0 keeps the original one-block policy.
@@ -3096,8 +3111,9 @@ static void up_diag(void) { @autoreleasepool {
          (unsigned long long)g_up_blocks_new, (unsigned long long)g_up_swaps, (unsigned long long)(g_up_swap_bytes >> 20), alive, (unsigned long long)(abytes >> 20), inres, (unsigned long long)(g_dev.currentAllocatedSize >> 20), nres, ndef);
 } }
 static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
+    size_t blk_cap = up_block_sz();
     size_t need = (n + 255u) & ~((size_t)255u);
-    size_t extra = MAX(need, UP_BLOCK_SIZE);
+    size_t extra = MAX(need, blk_cap);
     // This call starts one texture's upload: all prior deswizzles and copies are
     // complete records, so the batch can be split without ending the render pass.
     if (g_up_staging_bytes && (!g_up_block || need > g_up_block_size - g_up_block_off)
@@ -3105,8 +3121,8 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
         up_flush();
         up_begin();
     }
-    g_up_batch_bytes += MIN(need, UP_BLOCK_SIZE - g_up_batch_bytes);   // demand saturates at one retained block
-    if (!g_up_block && need <= UP_BLOCK_SIZE) {   // first allocation of the batch: the slot's own block, grown to the next power of two that holds it (a movie frame re-uploaded every frame, 8 MB in Link's Awakening)
+    g_up_batch_bytes += MIN(need, blk_cap - g_up_batch_bytes);   // demand saturates at one retained block
+    if (!g_up_block && need <= blk_cap) {   // first allocation of the batch: the slot's own block, grown to the next power of two that holds it (a movie frame re-uploaded every frame, 8 MB in Link's Awakening)
         __strong id<MTLBuffer> *sb = &g_up_slot_blk[g_up_cur_slot];
         size_t demand = up_reuse() ? MAX(need, g_up_slot_want[g_up_cur_slot]) : need;
         size_t want = UP_SLOT_BLOCK; while (want < demand) want <<= 1;
@@ -3121,12 +3137,12 @@ static id<MTLBuffer> up_alloc(size_t n, size_t *off) {
         // The old block and the "current block" retired at flush are two objects, so nothing is retired twice
         if (g_up_block) { g_up_swaps++; g_up_swap_bytes += g_up_block_size; if (!up_retained(g_up_block, g_up_cur_slot)) { @autoreleasepool { if (!g_up_old) g_up_old = [NSHashTable weakObjectsHashTable]; [g_up_old addObject:g_up_block]; } } static int leak = -1; if (leak < 0) leak = getenv("DM_TEST_UP_LEAK") != NULL;
             if (!leak && !up_retained(g_up_block, g_up_cur_slot)) { if (!g_up_keep) g_up_keep = [NSMutableArray array]; [g_up_keep addObject:g_up_block]; } }
-        if (up_reuse() && need <= UP_BLOCK_SIZE && !g_up_over_used) {
+        if (up_reuse() && need <= blk_cap && !g_up_over_used) {
             __strong id<MTLBuffer> *sb = &g_up_slot_over[g_up_cur_slot];
-            if (!*sb) { *sb = [g_dev newBufferWithLength:UP_BLOCK_SIZE options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; }
+            if (!*sb) { *sb = [g_dev newBufferWithLength:blk_cap options:MTLResourceStorageModePrivate]; if (!*sb) MDIE("failed to create the overflow staging block"); res_add(*sb); g_up_blocks_new++; }
             g_up_block = *sb; g_up_block_size = (*sb).length; g_up_over_used = 1;
         } else {
-            g_up_block_size = n > UP_BLOCK_SIZE ? need : UP_BLOCK_SIZE;
+            g_up_block_size = n > blk_cap ? need : blk_cap;
             g_up_block = [g_dev newBufferWithLength:g_up_block_size options:MTLResourceStorageModePrivate];
             res_add(g_up_block); g_up_blocks_new++;
         }
@@ -14182,7 +14198,7 @@ static void clear_ds_tri(const p_clear_ds *c) {
 // Test switches (Mac): DM_MEM_TRIM=<frame>:<tier>[,...] requests tiers at frames, DM_MEM_HEADROOM=<MB> stands in for os_proc_available_memory()
 size_t malloc_zone_pressure_relief(malloc_zone_t *zone, size_t goal);   // the header does not expose it to this file
 static _Atomic int g_mp_req, g_mp_reason;
-static int g_mp_pressured; static uint64_t g_mp_last_frame, g_mp_hold_until; static int g_mp_last_tier; static long g_mp_fake = -2;
+static int g_mp_pressured; static uint64_t g_mp_last_frame, g_mp_hold_until, g_mp_cooldown_until; static int g_mp_last_tier; static long g_mp_fake = -2;
 enum { MP_SRC_WARN = 1, MP_SRC_CRIT = 2, MP_UI = 3, MP_WATER = 4, MP_TEST = 5 };
 void mtl_mem_pressure_request(int tier, int reason) { int cur = atomic_load(&g_mp_req); while (tier > cur && !atomic_compare_exchange_weak(&g_mp_req, &cur, tier)) {} atomic_store(&g_mp_reason, reason); }
 static long mp_headroom_mb(void) {   // -1: unknown
@@ -14205,15 +14221,21 @@ void mtl_mem_pressure_tick(uint64_t frame) {   // the present thread, every fram
     long h = mp_headroom_mb();
     if (h >= 0) {
         int tier = h < 150 ? 2 : h < 300 ? 1 : 0;
-        if (tier && (tier > g_mp_last_tier || frame - g_mp_last_frame >= 300)) mtl_mem_pressure_request(tier, MP_WATER);
+        if (tier && (tier > g_mp_last_tier || frame - g_mp_last_frame >= 600)) mtl_mem_pressure_request(tier, MP_WATER);
         if (h < 450) g_mp_hold_until = frame + 900;   // still short: keep the ghost table small
-        if (!tier && g_mp_pressured && h >= 600 && frame >= g_mp_hold_until) { pthread_mutex_lock(&g_smu); g_ghost_limit = NGHOST; pthread_mutex_unlock(&g_smu); g_mp_pressured = 0; g_mp_last_tier = 0; MLOG("memory pressure over: headroom %ld MB, the ghost table is back to %d entries (frame %llu)", h, (int)NGHOST, (unsigned long long)frame); }
+        if (!tier && g_mp_pressured && h >= 600 && frame >= g_mp_hold_until) {
+            unsigned cap = ghost_cap();
+            pthread_mutex_lock(&g_smu); g_ghost_limit = cap; pthread_mutex_unlock(&g_smu);
+            g_mp_pressured = 0; g_mp_last_tier = 0;
+            MLOG("memory pressure over: headroom %ld MB, the ghost table is back to %u entries (frame %llu)", h, cap, (unsigned long long)frame);
+        }
     }
     if (atomic_load(&g_mp_req)) g_mp_hold_until = frame + 900;
 }
 static void mem_trim_if_requested(void) {
     int tier = atomic_exchange(&g_mp_req, 0); if (!tier) return;
     int reason = atomic_load(&g_mp_reason); uint64_t frame = atomic_load(&g_cur_frame);
+    if (reason != MP_TEST && frame < g_mp_cooldown_until && tier <= g_mp_last_tier) return;
     long h0 = mp_headroom_mb(); uint64_t gpu0 = g_dev.currentAllocatedSize >> 20, fp0 = mp_footprint_mb();
     static const char *const rn[] = {"", "system warning", "system critical", "app memory warning", "headroom watermark", "test switch"};
     char out[640]; int o = 0;
@@ -14245,10 +14267,12 @@ static void mem_trim_if_requested(void) {
         for (int i = 0; i < 3; i++) if (g_up_slot_blk[i]) { blkb += g_up_slot_blk[i].length; blk_n++; id b = g_up_slot_blk[i]; g_up_slot_blk[i] = nil; defer_obj_release(b); }
         o += snprintf(out + o, sizeof out - o, ", staging slot blocks %u (%llu MB)", blk_n, (unsigned long long)(blkb >> 20));
     }
-    // wait for the GPU once so the retired objects (swapped-out staging blocks, the textures above) go now
+    // Only stall the GPU if objects backed by real GPU memory were actually retired here.
     unsigned alive0 = 0; uint64_t ab0 = 0; if (g_up_old) @autoreleasepool { for (id<MTLBuffer> b in g_up_old.allObjects) { alive0++; ab0 += b.length; } }
-    mtl_finish_gpu();
-    pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) if (d->fence > g_done) d->fence = g_done; pthread_mutex_unlock(&g_deferred_mu);   // the GPU is idle and nothing is encoded yet: everything retired so far can go now, not after this submission
+    if (gn || spn || orn || blk_n || alive0) {
+        mtl_finish_gpu();
+        pthread_mutex_lock(&g_deferred_mu); for (NvDeferredRelease *d in g_deferred) if (d->fence > g_done) d->fence = g_done; pthread_mutex_unlock(&g_deferred_mu);   // the GPU is idle and nothing is encoded yet: everything retired so far can go now, not after this submission
+    }
     defer_drain();
     unsigned alive1 = 0; uint64_t ab1 = 0; if (g_up_old) @autoreleasepool { for (id<MTLBuffer> b in g_up_old.allObjects) { alive1++; ab1 += b.length; } }
     o += snprintf(out + o, sizeof out - o, ", swapped-out staging blocks %u -> %u (%llu -> %llu MB)", alive0, alive1, (unsigned long long)(ab0 >> 20), (unsigned long long)(ab1 >> 20));
@@ -14256,6 +14280,8 @@ static void mem_trim_if_requested(void) {
     o += snprintf(out + o, sizeof out - o, ", %u of the dropped ghost entries still alive", ghost_alive);
     malloc_zone_pressure_relief(NULL, 0);
     g_mp_pressured = 1; g_mp_last_tier = tier; g_mp_last_frame = frame;
+    uint64_t freed_bytes = gb + spb + orb + blkb;
+    g_mp_cooldown_until = frame + (freed_bytes < (16ull << 20) ? (reason == MP_WATER ? 1200u : 180u) : 60u);
     long h1 = mp_headroom_mb(); uint64_t gpu1 = g_dev.currentAllocatedSize >> 20, fp1 = mp_footprint_mb();
     MLOG("memory pressure: tier %d (%s, frame %llu), headroom %ld -> %ld MB (-1 = unknown), footprint %llu -> %llu MB, GPU allocated %llu -> %llu MB: %s, malloc relief", tier, rn[reason], (unsigned long long)frame, h0, h1, (unsigned long long)fp0, (unsigned long long)fp1, (unsigned long long)gpu0, (unsigned long long)gpu1, out);
 }

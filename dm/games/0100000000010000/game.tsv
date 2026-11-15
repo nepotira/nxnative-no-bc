@@ -30,3 +30,4 @@ app_pool	0xCD500000
 # ---- Shader split ----
 shader_groups	/ObjectData/=objectdata /StageData/=stagedata /SoundData/=sounddata /LayoutData/=layoutdata /LocalizedData/=localizeddata /EventData/=eventdata /MovieData/=moviedata /SystemData/=systemdata /ShaderData/=shaderdata /EffectData/=effectdata
 shader_note	Super Mario Odyssey shaders
+pso_mtl4	on
