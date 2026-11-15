@@ -57,6 +57,10 @@ on:
         description: 'Optional: offline pipeline archive GPUs (e.g. g18p or none). Defaults to none for iphone14pro_a16'
         required: false
         default: ''
+      pso_ios_min:
+        description: 'Optional: minimum iOS version for offline pipeline archives (DM_PSO_IOS_MIN, e.g. 27.2)'
+        required: false
+        default: ''
       romfs_overlay:
         description: 'Optional: RomFS mod .zip filename on tunnel or https:// URL (e.g. PT_BR.zip) baked as romfs_overlay'
         required: false
@@ -495,6 +499,7 @@ jobs:
           ALLOW_OTHER_METAL: ${{ inputs.allow_other_metal }}
           ROMFS_MODE: ${{ inputs.romfs }}
           PSO_GPUS_IN: ${{ inputs.pso_gpus }}
+          DM_PSO_IOS_MIN: ${{ inputs.pso_ios_min }}
           DEVICE_TYPE: ${{ inputs.device_type }}
         run: |
           set -euo pipefail

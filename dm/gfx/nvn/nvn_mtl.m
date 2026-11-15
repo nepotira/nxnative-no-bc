@@ -608,7 +608,8 @@ void mtl_init(void) {
     g_nvn_deswz_gpu = nvn_deswz_gpu_init(g_dev) == 0;
     dm_res_report_register(mtl_res_counts);
     if (!g_nvn_deswz_gpu) MLOG("[RED] GPU deswizzle init failed; swizzled textures fall back to the CPU");
-    MLOG("Metal device %s", g_dev.name.UTF8String);
+    NSString *gpu_arch = [(id)g_dev respondsToSelector:@selector(architecture)] ? g_dev.architecture.name : nil;
+    MLOG("Metal device %s (arch %s)", g_dev.name.UTF8String, gpu_arch ? gpu_arch.UTF8String : "unknown");
     udc_selftest();
 }
 
@@ -8638,6 +8639,17 @@ static void pre_pair(NSString *vk, NSString *fk, int zero) {
 }
 // What a prebuild covers (prebuilt.tsv): the chain version, the depth mode, and the pair lists' length in bytes and SHA-256 (first 16 hex digits). dm/gfx/tools/pso_offline.py writes
 // the same for the archive it makes offline, from the same files
+static int pre_has_pull(NSArray<NSArray<NSString *> *> *pairs) {
+    NSFileManager *fm = NSFileManager.defaultManager;
+    for (NSArray<NSString *> *p in pairs) {
+        NSDictionary *vj = pre_json(p[0]);
+        if (![vj[@"pull"] isKindOfClass:[NSDictionary class]]) continue;
+        NSString *bp = [NSString stringWithFormat:@"%@/%@_bp.metallib", g_msl_dir, p[0]];
+        romfs_img *img = NULL;
+        if ([fm fileExistsAtPath:bp] || msl_image_file(bp, &img) != NULL) return 1;
+    }
+    return 0;
+}
 static NSString *pre_stamp(NSString *txt, int zero) {
     NSData *d = [txt dataUsingEncoding:NSUTF8StringEncoding]; uint8_t h[CC_SHA256_DIGEST_LENGTH]; CC_SHA256(d.bytes, (CC_LONG)d.length, h);
     return [NSString stringWithFormat:@"chain\t%s\ndepth\t%s\npairs\t%lu\t%02x%02x%02x%02x%02x%02x%02x%02x\n", DMSH_CHAIN, zero ? "near=0" : "near=-w", (unsigned long)d.length,
@@ -8707,10 +8719,11 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         txt = rest; want = pre_stamp(rest, zero); pairs = pre_parse(rest); pp = rp; txt2 = nil;
     }
     if (!g_arch_cap) { g_pre_running = 0; return -1; }
+    NSString *dev_want = pre_has_pull(pairs) ? [want stringByAppendingString:@"pull\t1\n"] : want;
     NSString *stamp = [g_arch_dir stringByAppendingPathComponent:@"prebuilt.tsv"], *failp = [g_arch_dir stringByAppendingPathComponent:@"prebuild_failed.tsv"];
-    int other = 0; g_pre_known = pre_fail_load(failp, want, &other); g_pre_fails = [NSMutableArray array]; g_pre_known_n = 0;
+    int other = 0; g_pre_known = pre_fail_load(failp, dev_want, &other); g_pre_fails = [NSMutableArray array]; g_pre_known_n = 0;
     // done, unless its failures were found on another system build: then they are tried again (the rest are taken from the archive)
-    if ([[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:want] && !other) { g_pre_running = 0; return -1; }
+    if ([[NSString stringWithContentsOfFile:stamp encoding:NSUTF8StringEncoding error:nil] isEqualToString:dev_want] && !other) { g_pre_running = 0; return -1; }
     int n = (int)pairs.count; uint64_t t0 = bp_now();
     MLOG("pipeline prebuild: %d shader pairs of %s%s%s, %d workers (%s)", n, pp.UTF8String, txt2 ? " and " : "", txt2 ? pp2.UTF8String : "", threads, wait ? "tool" : prepare_on() ? "prepare step, before the first frame" : "background");
     atomic_store(&g_pre_next, 0);
@@ -8732,9 +8745,9 @@ static int pso_prebuild(int threads, int wait, dispatch_qos_class_t qos) {
         arch_flush_wait();
         NSMutableArray<NSString *> *fails = [NSMutableArray arrayWithArray:g_pre_known.allValues]; [fails addObjectsFromArray:g_pre_fails];
         if (fails.count) [[NSString stringWithFormat:@"# pipeline prebuild: pairs whose base failed to build on this system build, left to the draws until it or the stamp changes (nvn_mtl.m, pre_fail_load)\n%@%@\n",
-                            pre_fail_head(want), [fails componentsJoinedByString:@"\n"]] writeToFile:failp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+                            pre_fail_head(dev_want), [fails componentsJoinedByString:@"\n"]] writeToFile:failp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         else unlink(failp.fileSystemRepresentation);
-        [want writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
+        [dev_want writeToFile:stamp atomically:YES encoding:NSUTF8StringEncoding error:nil];
         MLOG("pipeline prebuild done: %d pairs, %d bases built, %d already archived, %d left to the draws, %d failed, %.1f s", n, (int)g_pre_built, (int)g_pre_archived, (int)g_pre_skipped, (int)g_pre_failed, (bp_now() - t0) / 1e9);
         if (fails.count) MLOG("pipeline prebuild: %lu pairs whose base failed are left to the draws (%s; %d of them failed on an earlier start of this system build, not built again); another system build tries them again",
                               (unsigned long)fails.count, failp.UTF8String, (int)g_pre_known_n);
