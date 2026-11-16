@@ -20,11 +20,11 @@ void dm_phone_motion_set(const dm_motion *m);   // publishes the newest sample; 
 // flip = the sign correction found on a device (BotW's tilt maze, landscape right: tilt inverted both ways, yaw right): bit 0 negates x, bit 1 negates y, S = diag(+-1, +-1, 1). "xy" (3),
 // the default, is a half turn about z. It applies to vectors here (acceleration, angular velocity, and so the angle integrated from it) and to the direction in dm_motion_dir (S D S)
 enum { DM_FLIP_NONE = 0, DM_FLIP_X = 1, DM_FLIP_Y = 2, DM_FLIP_XY = 3 };
-static inline int dm_motion_flip_parse(const char *s) {   // DM_MOTION_FLIP: none | xy | x | y; unset or unknown = xy
-    if (s && !strcmp(s, "none")) return DM_FLIP_NONE;
+static inline int dm_motion_flip_parse(const char *s) {   // DM_MOTION_FLIP: none (default) | xy | x | y
+    if (s && !strcmp(s, "xy")) return DM_FLIP_XY;
     if (s && !strcmp(s, "x")) return DM_FLIP_X;
     if (s && !strcmp(s, "y")) return DM_FLIP_Y;
-    return DM_FLIP_XY;
+    return DM_FLIP_NONE;
 }
 static inline const char *dm_motion_flip_name(int flip) { return flip == DM_FLIP_NONE ? "none" : flip == DM_FLIP_X ? "x" : flip == DM_FLIP_Y ? "y" : "xy"; }
 static inline void dm_motion_vec(int home_right, int flip, const double v[3], double o[3]) {

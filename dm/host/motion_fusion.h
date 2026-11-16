@@ -63,6 +63,26 @@ static inline void m3_orthonormalize(float R[3][3]) {   // Gram-Schmidt on the c
     }
     for (int i = 0; i < 3; i++) for (int j = 0; j < 3; j++) R[i][j] = c[j][i];
 }
+static inline void motion_align_level(motion_state *s, const float a[3]) {
+    float n = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
+    if (n <= 0.5f || n >= 1.5f) return;
+    // world down (0,0,-1) = R g_body  ->  R's third row = -g_body / |g|
+    float z[3] = {-a[0] / n, -a[1] / n, -a[2] / n}, y0[3] = {0, 1, 0};
+    // Upright phones have gravity along y: choose another heading reference before projecting it onto the level plane.
+    if (fabsf(z[1]) > 0.99f) { y0[0] = 1; y0[1] = 0; }
+    float d = y0[0] * z[0] + y0[1] * z[1] + y0[2] * z[2];
+    float y[3] = {y0[0] - d * z[0], y0[1] - d * z[1], y0[2] - d * z[2]};
+    float yn = sqrtf(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
+    if (yn > 1e-3f) {
+        for (int i = 0; i < 3; i++) y[i] /= yn;
+        float x[3] = {y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]};
+        for (int j = 0; j < 3; j++) { s->R[0][j] = x[j]; s->R[1][j] = y[j]; s->R[2][j] = z[j]; }
+    }
+}
+static inline void motion_recenter(motion_state *s) {
+    memset(s->angle, 0, sizeof s->angle);
+    if (s->primed) motion_align_level(s, s->acc);
+}
 // One sample: raw Apple acceleration (G) and rotation rate (rad/s), dt in seconds since the previous one (0 for the first). k = tilt correction gain (rad/s per unit error)
 static inline void motion_update(motion_state *s, const motion_map *m, const float acc_raw[3], const float rot_raw[3], float dt, float k) {
     // A bad sensor sample must not prime or poison the persistent fusion state.
@@ -73,24 +93,7 @@ static inline void motion_update(motion_state *s, const motion_map *m, const flo
     motion_map_apply(m, acc_raw, a, m->acc_sign);
     motion_map_apply(m, rot_raw, w, m->det);           // rad/s in the Switch frame
     if (!s->primed || dt <= 0 || dt > 0.25f) {         // first sample or a gap: no integration step
-        if (!s->primed) {                              // start level with the measured gravity, facing forward
-            float n = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
-            if (n > 0.5f && n < 1.5f) {
-                // world down (0,0,-1) = R g_body  ->  R's third row = -g_body / |g|
-                float z[3] = {-a[0] / n, -a[1] / n, -a[2] / n}, y0[3] = {0, 1, 0};
-                // Upright phones have gravity along y: choose another heading reference before projecting it onto the level plane.
-                if (fabsf(z[1]) > 0.99f) { y0[0] = 1; y0[1] = 0; }
-                float d = y0[0] * z[0] + y0[1] * z[1] + y0[2] * z[2];
-                float y[3] = {y0[0] - d * z[0], y0[1] - d * z[1], y0[2] - d * z[2]};
-                float yn = sqrtf(y[0] * y[0] + y[1] * y[1] + y[2] * y[2]);
-                if (yn > 1e-3f) {
-                    for (int i = 0; i < 3; i++) y[i] /= yn;
-                    float x[3] = {y[1] * z[2] - y[2] * z[1], y[2] * z[0] - y[0] * z[2], y[0] * z[1] - y[1] * z[0]};
-                    for (int j = 0; j < 3; j++) { s->R[0][j] = x[j]; s->R[1][j] = y[j]; s->R[2][j] = z[j]; }
-                }
-            }
-            s->primed = 1;
-        }
+        if (!s->primed) { motion_align_level(s, a); s->primed = 1; }   // start level with the measured gravity, facing forward
     } else {
         // tilt correction: predicted gravity in the body = R^T (0,0,-1) = -(third row of R)
         float n = sqrtf(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]);
