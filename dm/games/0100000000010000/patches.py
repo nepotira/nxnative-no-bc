@@ -3,9 +3,9 @@ import struct
 
 from nso_asm import ADDI, ADRP, B
 
-BUILD = 'b424be150a8e7d78701cbe7a439d9ebf'   # update 1.4.1 (v393216) main
-ASPECT_STATE = 0x280   # float desired drawable width / height (written by host loader.c)
-ASPECT_ACK = 0x284     # float host-visible applied aspect (0 = stock 16:9)
+_build = 'b424be150a8e7d78701cbe7a439d9ebf'   # update 1.4.1 (v393216) main
+_aspect_state = 0x280   # float desired drawable width / height (written by host loader.c)
+_aspect_ack = 0x284     # float host-visible applied aspect (0 = stock 16:9)
 
 
 def _f32(value): return struct.unpack('<I', struct.pack('<f', value))[0]
@@ -54,12 +54,12 @@ def _scene_aspect(ctx):
     _load_f32(w, 17, 0.01)
     w.append(_fcmp(16, 17))
     not_wide = len(w); w.append(0)
-    _state_addr(ctx, w, 17, ASPECT_STATE)
+    _state_addr(ctx, w, 17, _aspect_state)
     w.append(_ldar_w(16, 17))
     off_branch = len(w); w.append(0)
     w.append(_fmov_sw(0, 16))
     ack = len(w)
-    _state_addr(ctx, w, 17, ASPECT_ACK)
+    _state_addr(ctx, w, 17, _aspect_ack)
     w.append(_stlr_w(16, 17))
     end = len(w)
     w[not_wide] = _b_cond(ctx.here() + not_wide * 4, ctx.here() + end * 4, 2)   # cs: |aspect - 16/9| >= 0.01
@@ -72,7 +72,7 @@ def _ortho_width(ctx, site):
     # Multiplies layout ortho width by (wide * 9/16) so 2D space matches screen aspect and 16:9 HUD widgets stay unstretched.
     ctx.site(site, '0000231e')
     w = [0x1e230000]
-    _state_addr(ctx, w, 17, ASPECT_STATE)
+    _state_addr(ctx, w, 17, _aspect_state)
     w.append(_ldar_w(16, 17))
     disabled = len(w); w.append(0)
     w.append(_fmov_sw(16, 16))
@@ -90,7 +90,7 @@ def _backdrop_pane(ctx):
     site = 0x908c3c
     ctx.site(site, 'e8024039')
     w = [0x394002e8]
-    _state_addr(ctx, w, 17, ASPECT_STATE)
+    _state_addr(ctx, w, 17, _aspect_state)
     w.append(_ldar_w(16, 17))
     b_off = len(w); w.append(0)
     w.append(_ldr_s(0, 19, 0x50))
@@ -109,7 +109,7 @@ def _backdrop_pane(ctx):
     b_hhi = len(w); w.append(0)
     w.extend((ADDI(17, 19, 0xd1), _ldr_w(17, 17, 0), _movz(16, 0x6f52), _movk16(16, 0x746f), _cmp_w(17, 16)))
     b_root = len(w); w.append(0)
-    _state_addr(ctx, w, 17, ASPECT_STATE)
+    _state_addr(ctx, w, 17, _aspect_state)
     w.extend((_ldar_w(16, 17), _fmov_sw(16, 16), _fmul(0, 0, 16)))
     _load_f32(w, 16, 9.0 / 16.0)
     w.extend((_fmul(0, 0, 16), _str_s(0, 19, 0x50)))
@@ -131,11 +131,11 @@ def widescreen(ctx):
 
 
 FRAME_STEP = {
-    BUILD: widescreen,
+    _build: widescreen,
 }
 
 CAPABILITIES = {
-    BUILD: ('CAMERA_ASPECT',),
+    _build: ('CAMERA_ASPECT',),
 }
 
 BINDING = [

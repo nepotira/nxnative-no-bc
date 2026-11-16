@@ -281,6 +281,15 @@ static inline MTL4VisibilityOptions resource_vis(void) { return MTL4VisibilityOp
 // Residency churn by call site (the power line every 300 frames, mtl_res_stats): each commit with changes is a kernel call whose cost grows with what was added or removed
 enum { RS_SITES = 16 }; static struct { int line; uint64_t n, bytes; } g_rs_site[RS_SITES]; static uint64_t g_rs_rm, g_rs_commits, g_rs_commit_ns;
 // [o conformsToProtocol:@protocol(MTLTexture)], answered once per class on each thread: class_conformsToProtocol walks the class's protocol lists at every call.
+static inline int ios_tight_ram(void) {
+#if TARGET_OS_IPHONE
+    static int v = -1;
+    if (v < 0) v = [NSProcessInfo processInfo].physicalMemory <= (6500ull << 20);   // <= 6 GiB devices (e.g. iPhone 14) keep tighter GPU cache caps
+    return v;
+#else
+    return 0;
+#endif
+}
 static inline int obj_is_texture(id o) {
     if (!o) return 0;
     static __thread uintptr_t cls[4]; static __thread uint8_t ans[4]; static __thread unsigned next;
@@ -2473,15 +2482,6 @@ static void serial_del(uint64_t k) { pthread_mutex_lock(&g_smu); id old = hm_get
 // Finalize comes: about 10 a frame, 200,000 after an hour in the first shrine. A dead serial resolves through g_ghost instead, a small table whose oldest entry goes when a new one comes,
 // so a record replayed again soon still finds its texture
 enum { NGHOST = 512 };
-static inline int ios_tight_ram(void) {
-#if TARGET_OS_IPHONE
-    static int v = -1;
-    if (v < 0) v = [NSProcessInfo processInfo].physicalMemory <= (6500ull << 20);   // <= 6 GiB devices (e.g. iPhone 14) keep tighter GPU cache caps
-    return v;
-#else
-    return 0;
-#endif
-}
 static inline unsigned ghost_cap(void) { return ios_tight_ram() ? 128u : (unsigned)NGHOST; }
 static nvn_hmap g_tex_live = {.klen = 8};   // serial → the texture object it was initialized in (mtl_tex_release), under g_smu
 static nvn_hmap g_ghost = {.klen = 8}; static uint64_t g_ghost_ring[NGHOST]; static unsigned g_ghost_next; static uint64_t g_ghost_puts;
