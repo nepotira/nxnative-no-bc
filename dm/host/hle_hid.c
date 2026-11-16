@@ -634,6 +634,11 @@ void dm_phone_motion_set(const dm_motion *sample) {
 }
 void dm_motion_set(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 0, 0); }
 void dm_motion_set_switch(int p, const float acc[3], const float rot[3]) { motion_set(p, acc, rot, 1, 0); }
+void dm_motion_recenter_phone(void) {
+    pthread_mutex_lock(&g_phone_motion.mu);
+    motion_recenter(&g_phone_motion.st);
+    pthread_mutex_unlock(&g_phone_motion.mu);
+}
 void dm_motion_set_hid(int p, const float acc[3], const float rot[3], uint64_t t) { if (t) motion_set(p, acc, rot, 2, t); }
 void dm_motion_clear(int p) {
     if (p < 0 || p >= DM_PLAYERS) return;

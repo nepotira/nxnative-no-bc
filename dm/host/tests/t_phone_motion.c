@@ -63,13 +63,13 @@ static void t_upright(int flip) {
     CHECK(dir_is(dir, D, flip), "upright: a flip conjugates the rows (xz, yz, zx, zy negate for xy)");
 }
 static void t_modes(void) {
-    CHECK(dm_motion_flip_parse(NULL) == DM_FLIP_XY && dm_motion_flip_parse("xy") == DM_FLIP_XY && dm_motion_flip_parse("bogus") == DM_FLIP_XY, "the default and unknown names are xy");
-    CHECK(dm_motion_flip_parse("none") == DM_FLIP_NONE && dm_motion_flip_parse("x") == DM_FLIP_X && dm_motion_flip_parse("y") == DM_FLIP_Y, "none, x and y");
+    CHECK(dm_motion_flip_parse(NULL) == DM_FLIP_NONE && dm_motion_flip_parse("none") == DM_FLIP_NONE && dm_motion_flip_parse("bogus") == DM_FLIP_NONE, "the default and unknown names are none");
+    CHECK(dm_motion_flip_parse("xy") == DM_FLIP_XY && dm_motion_flip_parse("x") == DM_FLIP_X && dm_motion_flip_parse("y") == DM_FLIP_Y, "xy, x and y");
     CHECK(!strcmp(dm_motion_flip_name(DM_FLIP_XY), "xy") && !strcmp(dm_motion_flip_name(DM_FLIP_NONE), "none"), "names round-trip");
-    // the default, landscape right, resting phone as logged on the device: acc (0.03, -0.49, -0.88) in the unflipped frame becomes (-0.03, 0.49, -0.88)
+    // landscape right, resting phone: acc (0.03, -0.49, -0.88) in the default unflipped frame, negated if DM_MOTION_FLIP=xy is requested
     double r[3] = {-0.49, -0.03, -0.88}, o[3];   // the device-frame reading that maps to (0.03, -0.49, -0.88) unflipped
-    dm_motion_vec(1, DM_FLIP_NONE, r, o); CHECK(near3(o, 0.03, -0.49, -0.88), "device reading, unflipped");
-    dm_motion_vec(1, dm_motion_flip_parse(NULL), r, o); CHECK(near3(o, -0.03, 0.49, -0.88), "device reading, default xy: x and y negated, z kept");
+    dm_motion_vec(1, dm_motion_flip_parse(NULL), r, o); CHECK(near3(o, 0.03, -0.49, -0.88), "device reading, default none: unflipped Switch frame");
+    dm_motion_vec(1, dm_motion_flip_parse("xy"), r, o); CHECK(near3(o, -0.03, 0.49, -0.88), "device reading, optional xy: x and y negated, z kept");
 }
 int main(void) {
     for (int hr = 0; hr < 2; hr++) for (int f = 0; f < 4; f++) { t_flat(hr, f); t_tilt(hr, f); t_yaw(hr, f); }

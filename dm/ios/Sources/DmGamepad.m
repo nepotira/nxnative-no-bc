@@ -25,6 +25,7 @@
 #include "game_profile.h"
 #include "haptics_apple.h"
 #include "motion_apple.h"
+#include "motion_fusion.h"
 #include "dm_motion.h"
 #include "pad_apple.h"
 #include "pad_slots.h"
@@ -62,27 +63,32 @@ static void publish(void) {   // the touch gamepad and the shake; the host ORs t
 // is one shake (the host finishes it as a whole cycle) and shaking on keeps it going. Holding the phone and pressing the screen stays far below the threshold. Each detected shake is
 // logged with its peak. Shake detection works with motion controls on or off
 static CMMotionManager *g_motion;
-static _Atomic int g_home_right = 1;   // the interface is landscape right (home indicator on the right); updated on the main thread (orient_update)
+static _Atomic int g_iface_orient = 3;   // UIInterfaceOrientation: 1 portrait, 2 upside down, 3 landscape right, 4 landscape left
+static BOOL g_motion_body;               // iOS 27+: CoreMotion delivers samples in the pad view's frame directly
 static void orient_update(UIView *v) {
-    UIInterfaceOrientation o = v.window.windowScene.effectiveGeometry.interfaceOrientation;
-    if (o == UIInterfaceOrientationLandscapeRight) atomic_store(&g_home_right, 1);
-    else if (o == UIInterfaceOrientationLandscapeLeft) atomic_store(&g_home_right, 0);
+    UIWindowScene *ws = v.window.windowScene;
+    if (ws && ws.effectiveGeometry.interfaceOrientation)
+        atomic_store(&g_iface_orient, (int)ws.effectiveGeometry.interfaceOrientation);
 }
-static void motion_start(void) {
+static void motion_start(UIView *body) {
     if (g_motion) return;
     g_motion = [CMMotionManager new];
     if (!g_motion.deviceMotionAvailable) { LOG("front end: no device motion, the phone's motion and shaking do nothing"); return; }
     const char *e = getenv("DM_SHAKE_G"); double thr = e && atof(e) > 0 ? atof(e) : 1.5;
     const char *mo = getenv("DM_MOTION"); BOOL live = !mo || atoi(mo);
     const char *pm = getenv("DM_PHONE_MOTION"); if (pm && !strcmp(pm, "0")) live = NO;
-    int flip = dm_motion_flip_parse(getenv("DM_MOTION_FLIP"));   // axis sign correction, see dm_motion.h
+    int flip = dm_motion_flip_parse(getenv("DM_MOTION_FLIP"));   // optional axis sign override; default is none
     CMAttitudeReferenceFrame frame = ([CMMotionManager availableAttitudeReferenceFrames] & CMAttitudeReferenceFrameXArbitraryCorrectedZVertical)
         ? CMAttitudeReferenceFrameXArbitraryCorrectedZVertical : CMAttitudeReferenceFrameXArbitraryZVertical;
-    LOG("front end: %s (axis flip %s, reference frame %s); shaking the phone shakes the controller (threshold %.2f G)", live ? "motion controls: the phone is the controller's six-axis sensor (hold both sticks 1 s to recenter)" : "motion controls off", dm_motion_flip_name(flip), frame == CMAttitudeReferenceFrameXArbitraryCorrectedZVertical ? "xArbitraryCorrectedZVertical" : "xArbitraryZVertical", thr);
+    if (@available(iOS 27.0, *)) { g_motion.deviceMotionBody = body; g_motion_body = YES; }
+    LOG("front end: %s (axis flip %s, reference frame %s%s); shaking the phone shakes the controller (threshold %.2f G)",
+        live ? "motion controls: the phone is the controller's six-axis sensor (hold both sticks 1 s to recenter)" : "motion controls off",
+        dm_motion_flip_name(flip),
+        frame == CMAttitudeReferenceFrameXArbitraryCorrectedZVertical ? "xArbitraryCorrectedZVertical" : "xArbitraryZVertical",
+        g_motion_body ? ", view frame deviceMotionBody" : "", thr);
     g_motion.deviceMotionUpdateInterval = 1.0 / 120;
-    double *angle = calloc(3, sizeof *angle);   // the integrated turn, revolutions (lives as long as the app)
     NSOperationQueue *q = [NSOperationQueue new]; q.maxConcurrentOperationCount = 1; q.qualityOfService = NSQualityOfServiceUserInteractive;
-    __block double last = -1, peak = 0, prev = -1, yaw0 = 0, rate_t0 = -1; __block BOOL haveYaw = NO, recentred = NO; __block int rate_n = 0;
+    __block double last = -1, peak = 0, rate_t0 = -1; __block BOOL recentred = NO; __block int rate_n = 0;
     [g_motion startDeviceMotionUpdatesUsingReferenceFrame:frame toQueue:q withHandler:^(CMDeviceMotion *d, NSError *err) {
         if (err) { LOG("[RED] front end: CoreMotion device motion: %s", err.localizedDescription.UTF8String); return; }
         if (!d) return;
@@ -97,26 +103,21 @@ static void motion_start(void) {
         pthread_mutex_lock(&g_mu); BOOL changed = g_shake_btn != want; g_shake_btn = want; double since = g_sticks_since; pthread_mutex_unlock(&g_mu);
         if (changed) publish();
         if (!live) return;
-        int hr = atomic_load(&g_home_right);
-        CMRotationMatrix r = d.attitude.rotationMatrix;
-        double m[9] = {r.m11, r.m12, r.m13, r.m21, r.m22, r.m23, r.m31, r.m32, r.m33};
+        int orient = g_motion_body ? 1 : atomic_load(&g_iface_orient);   // deviceMotionBody reports in the view's frame (picture right/top/out)
+        float ga[3] = {(float)(d.gravity.x + u.x), (float)(d.gravity.y + u.y), (float)(d.gravity.z + u.z)};
+        float ro[3] = {(float)d.rotationRate.x, (float)d.rotationRate.y, (float)d.rotationRate.z}, a[3], w[3];
+        motion_phone_to_switch(orient, ga, a);
+        motion_phone_to_switch(orient, ro, w);
+        if (flip & DM_FLIP_X) { a[0] = -a[0]; w[0] = -w[0]; }
+        if (flip & DM_FLIP_Y) { a[1] = -a[1]; w[1] = -w[1]; }
+        dm_motion_set_switch(0, a, w);
         BOOL held = since > 0 && d.timestamp - since >= 1.0;
         if (!held) recentred = NO;
-        if (!haveYaw || (held && !recentred)) {
-            double was = yaw0; yaw0 = dm_motion_yaw(hr, m); angle[0] = angle[1] = angle[2] = 0;
-            if (haveYaw) LOG("front end: motion recentred, heading %.1f -> %.1f deg (landscape %s)", was * 180 / M_PI, yaw0 * 180 / M_PI, hr ? "right" : "left");
-            haveYaw = YES; recentred = held;
+        if (held && !recentred) {
+            dm_motion_recenter_phone();
+            LOG("front end: motion recentred (orient %d%s)", orient, g_motion_body ? ", view body" : "");
+            recentred = YES;
         }
-        double ga[3] = {d.gravity.x + u.x, d.gravity.y + u.y, d.gravity.z + u.z}, ro[3] = {d.rotationRate.x, d.rotationRate.y, d.rotationRate.z}, a[3], w[3];
-        dm_motion_vec(hr, flip, ga, a); dm_motion_vec(hr, flip, ro, w);
-        double dt = prev >= 0 ? fmin(d.timestamp - prev, 0.1) : 0; prev = d.timestamp;
-        dm_motion s; s.home_right = hr;
-        for (int k = 0; k < 3; k++) {
-            s.acc[k] = (float)a[k]; s.gyro[k] = (float)(w[k] / (2 * M_PI));
-            angle[k] += w[k] / (2 * M_PI) * dt; s.angle[k] = (float)angle[k];
-        }
-        dm_motion_dir(hr, flip, m, yaw0, s.dir);
-        dm_phone_motion_set(&s);
     }];
 }
 
@@ -239,9 +240,12 @@ static BOOL fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }   
         [nc addObserver:self selector:@selector(padsChanged:) name:GCControllerDidDisconnectNotification object:nil];
         pads_start();
         [self padsChanged:nil];
-        motion_start();
     }
     return self;
+}
+- (void)didMoveToWindow {
+    [super didMoveToWindow];
+    if (self.window) { orient_update(self); motion_start(self); }
 }
 - (void)applyLayout {   // show / hide the controls for the current layout
     [CATransaction begin]; [CATransaction setDisableActions:YES];

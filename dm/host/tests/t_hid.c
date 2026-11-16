@@ -530,6 +530,20 @@ static void t_phone_attitude(void) {
     dm_phone_motion_set(&m); g_phone_mode = 0;
     CHECK(!motion_live(0, &(motion_state){0}), "phone mode off ignores fused attitude");
     dm_phone_motion_set(NULL); g_phone_mode = -1;
+    // Direct Switch-frame fusion path + recenter (L3+R3 hold)
+    g_phone_mode = 1;
+    float flat[3] = {0, 0, -1}, yaw[3] = {0, 0, (float)M_PI};
+    dm_motion_set_switch(0, flat, yaw);
+    motion_now += 200000000ull;   // 0.2 s -> 0.1 rev yaw (within dt <= 0.25s cap)
+    dm_motion_set_switch(0, flat, yaw);
+    motion_now += 200000000ull;   // 0.4 s -> 0.2 rev yaw (sin 72 deg > 0.9)
+    dm_motion_set_switch(0, flat, yaw);
+    h_hid_SixStates(&st, 1, &h);
+    CHECK(fabsf(st.angle[2] - 0.20f) < 0.02f && fabsf(st.dir[1]) > 0.9f, "Switch-frame integration rotates angle and yaw");
+    dm_motion_recenter_phone();
+    h_hid_SixStates(&st, 1, &h);
+    CHECK(st.angle[0] == 0 && st.angle[1] == 0 && st.angle[2] == 0 && fabsf(st.dir[0] - 1.f) < 1e-4f && fabsf(st.dir[4] - 1.f) < 1e-4f, "recenter zeroes angle and snaps yaw forward");
+    dm_phone_motion_set(NULL); g_phone_mode = -1;
 }
 
 int main(void) {

@@ -962,7 +962,38 @@ static void cmd_new_segment(cmd_t *o, uint8_t *mem, size_t n) {
 uint64_t dm_nvn_frame_count(void);
 typedef struct { uint8_t *mem; size_t n; uint64_t frame; int busy; uintptr_t org_lo, org_hi; } hostseg_t;   // org: the guest range of the recording it hangs off (0 = unknown, never reclaimed)
 static hostseg_t *g_hostseg; static int g_nhostseg, g_caphostseg; static uint64_t g_hostseg_bytes;
+static int *g_hs_reclaim, g_hs_capreclaim;   // indices in g_hostseg with busy && org_hi > 0 (O(1) hostseg_release)
+static _Atomic int g_hs_nreclaim;
+static struct { int *idx; int n, cap; } g_hs_free[3];       // 0: HOSTSEG_SMALL, 1: HOSTSEG_SZ, 2: custom sizes
 static pthread_mutex_t g_hostseg_mu = PTHREAD_MUTEX_INITIALIZER;
+static inline int hs_bucket(size_t n) { return n == HOSTSEG_SMALL ? 0 : n == HOSTSEG_SZ ? 1 : 2; }
+static void hs_idx_push(int **arr, int *n, int *cap, int idx) {
+    if (*n == *cap) { int nc = *cap ? *cap * 2 : 64; int *p = realloc(*arr, sizeof **arr * (size_t)nc); if (!p) die("hostseg index table"); *arr = p; *cap = nc; }
+    (*arr)[(*n)++] = idx;
+}
+static void hs_reclaim_push(int idx) {
+    int n = atomic_load_explicit(&g_hs_nreclaim, memory_order_relaxed);
+    if (n == g_hs_capreclaim) { int nc = g_hs_capreclaim ? g_hs_capreclaim * 2 : 64; int *p = realloc(g_hs_reclaim, sizeof *p * (size_t)nc); if (!p) die("hostseg reclaim table"); g_hs_reclaim = p; g_hs_capreclaim = nc; }
+    g_hs_reclaim[n] = idx;
+    atomic_store_explicit(&g_hs_nreclaim, n + 1, memory_order_release);
+}
+static int hs_free_pop(size_t n) {
+    int b = hs_bucket(n);
+    while (g_hs_free[b].n > 0) {
+        int i = g_hs_free[b].idx[g_hs_free[b].n - 1];
+        if (b != 2) { g_hs_free[b].n--; if (!g_hostseg[i].busy && g_hostseg[i].n == n) return i; continue; }
+        for (int k = g_hs_free[b].n - 1; k >= 0; k--) {
+            int j = g_hs_free[b].idx[k];
+            if (g_hostseg[j].busy) { g_hs_free[b].idx[k] = g_hs_free[b].idx[--g_hs_free[b].n]; continue; }
+            if (g_hostseg[j].n == n) { g_hs_free[b].idx[k] = g_hs_free[b].idx[--g_hs_free[b].n]; return j; }
+        }
+        break;
+    }
+    if (g_nhostseg <= 256) {   // small pools (e.g. t_nvn unit test clearing .busy directly)
+        for (int i = 0; i < g_nhostseg; i++) if (!g_hostseg[i].busy && g_hostseg[i].n == n) return i;
+    }
+    return -1;
+}
 static size_t hostseg_size(const cmd_t *o, int empty_pool, size_t want) {
     if (empty_pool) return want && want <= HOSTSEG_SMALL && !o->recording ? HOSTSEG_SMALL : HOSTSEG_SZ;
     return want + 16 > HOSTSEG_SZ ? (want + 16 + 0xfff) & ~(size_t)0xfff : HOSTSEG_SZ;   // 16: room for the next JUMP (want holds OP_RESERVE already, this is slack for the alignment)
@@ -972,15 +1003,22 @@ static uint8_t *hostseg_take(const cmd_t *o, size_t n) {
     static unsigned total; uint64_t f = dm_nvn_frame_count(); uint8_t *m = NULL;
     uintptr_t lo = 0, hi = 0, cur = o ? (uintptr_t)o->cur : 0;
     pthread_mutex_lock(&g_hostseg_mu);
-    int in_seg = 0;   // by the segment's end too: a small segment can end where another one starts
-    for (int i = 0; i < g_nhostseg && cur; i++) if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) { lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break; }
-    if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
-    for (int i = 0; i < g_nhostseg && !m; i++)
-        if (!g_hostseg[i].busy && g_hostseg[i].n == n) { g_hostseg[i] = (hostseg_t){ g_hostseg[i].mem, n, f, 1, lo, hi }; m = g_hostseg[i].mem; }
-    if (!m && g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
-        if (g_nhostseg == g_caphostseg) { g_caphostseg = g_caphostseg ? g_caphostseg * 2 : 64; g_hostseg = realloc(g_hostseg, sizeof *g_hostseg * (size_t)g_caphostseg); }
-        g_hostseg[g_nhostseg++] = (hostseg_t){ m, n, f, 1, lo, hi }; g_hostseg_bytes += n;
+    int in_seg = 0, nr = atomic_load_explicit(&g_hs_nreclaim, memory_order_relaxed);
+    for (int r = 0; r < nr && cur; r++) {
+        int i = g_hs_reclaim[r];
+        if (cur >= (uintptr_t)g_hostseg[i].mem && o->end == g_hostseg[i].mem + g_hostseg[i].n) {
+            lo = g_hostseg[i].org_lo; hi = g_hostseg[i].org_hi; in_seg = 1; break;
+        }
     }
+    if (!in_seg && o && o->recording && o->cur) { lo = o->recording == 1 && o->begin && (uintptr_t)o->begin <= cur ? (uintptr_t)o->begin : cur; hi = cur + 16; }
+    int si = hs_free_pop(n);
+    if (si >= 0) { g_hostseg[si] = (hostseg_t){ g_hostseg[si].mem, n, f, 1, lo, hi }; m = g_hostseg[si].mem; }
+    else if (g_hostseg_bytes + n <= HOSTSEG_CAP && (m = malloc(n))) {
+        if (g_nhostseg == g_caphostseg) { int nc = g_caphostseg ? g_caphostseg * 2 : 64; hostseg_t *np = realloc(g_hostseg, sizeof *np * (size_t)nc); if (!np) die("hostseg table"); g_hostseg = np; g_caphostseg = nc; }
+        si = g_nhostseg++;
+        g_hostseg[si] = (hostseg_t){ m, n, f, 1, lo, hi }; g_hostseg_bytes += n;
+    }
+    if (m && hi > 0) hs_reclaim_push(si);
     unsigned t = ++total; int ns = g_nhostseg; uint64_t bytes = g_hostseg_bytes;
     pthread_mutex_unlock(&g_hostseg_mu);
     if (!m) die("NVN command memory: the game's pool is empty and host-lent segments reached %u MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
@@ -989,8 +1027,22 @@ static uint8_t *hostseg_take(const cmd_t *o, size_t n) {
 }
 // The game gives out [lo, hi): segments whose recording's guest bytes overlap it are dead, reclaim them
 static void hostseg_release(uintptr_t lo, uintptr_t hi) {
+    if (!atomic_load_explicit(&g_hs_nreclaim, memory_order_acquire)) return;
     pthread_mutex_lock(&g_hostseg_mu);
-    for (int i = 0; i < g_nhostseg; i++) if (g_hostseg[i].busy && g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) g_hostseg[i].busy = 0;
+    int nr = atomic_load_explicit(&g_hs_nreclaim, memory_order_relaxed);
+    for (int r = 0; r < nr; ) {
+        int i = g_hs_reclaim[r];
+        if (!g_hostseg[i].busy) { g_hs_reclaim[r] = g_hs_reclaim[--nr]; continue; }
+        if (g_hostseg[i].org_hi > lo && g_hostseg[i].org_lo < hi) {
+            g_hostseg[i].busy = 0;
+            int b = hs_bucket(g_hostseg[i].n);
+            hs_idx_push(&g_hs_free[b].idx, &g_hs_free[b].n, &g_hs_free[b].cap, i);
+            g_hs_reclaim[r] = g_hs_reclaim[--nr];
+            continue;
+        }
+        r++;
+    }
+    atomic_store_explicit(&g_hs_nreclaim, nr, memory_order_release);
     pthread_mutex_unlock(&g_hostseg_mu);
 }
 NVN(nvnCommandBufferAddCommandMemory, void, NVNcommandBuffer *c, const NVNmemoryPool *p, ptrdiff_t off, size_t n) {
